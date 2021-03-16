@@ -32,8 +32,8 @@ class normal_lowrank : public base_family {
                        const Eigen::MatrixXd& B) {
     stan::math::check_not_nan(function, "Low rank factor", B);
     stan::math::check_size_match(function,
-                                 "Dimension of factor", B.rows(),
-                                 "Dimension of approximation", dimension());
+                                 "Dimension of mean vector", dimension(),
+                                 "Dimension of low-rank factor", B.rows());
     stan::math::check_size_match(function,
                                  "Rank of factor", B.cols(),
                                  "Rank of approximation", rank());
@@ -41,10 +41,10 @@ class normal_lowrank : public base_family {
 
   void validate_noise(const char *function,
                       const Eigen::VectorXd& d) {
-    stan::math::check_not_nan(function, "Noise vector", d);
+    stan::math::check_not_nan(function, "log std vector", d);
     stan::math::check_size_match(function,
-                                 "Dimension of noise vector", d.size(),
-                                 "Dimension of approximation", dimension());
+                                 "Dimension of mean vector", dimension(),
+                                 "Dimension of log std vector", d.size());
   }
 
  public:
@@ -244,6 +244,17 @@ class normal_lowrank : public base_family {
                  callbacks::logger& logger) const {
     static const char* function =
       "stan::variational::normal_lowrank::calc_grad";
+
+    stan::math::check_size_match(function, "Dimension of elbo_grad",
+                                 elbo_grad.dimension(),
+                                 "Dimension of variational q", dimension());
+    stan::math::check_size_match(function, "Dimension of variational q",
+                                 dimension(), "Dimension of variables in model",
+                                 cont_params.size());
+
+    stan::math::check_size_match(function, "Rank of elbo_grad",
+                                 elbo_grad.rank(),
+                                 "Rank of variational q", rank());
 
     Eigen::VectorXd mu_grad = Eigen::VectorXd::Zero(dimension());
     Eigen::MatrixXd B_grad = Eigen::MatrixXd::Zero(dimension(), rank());
