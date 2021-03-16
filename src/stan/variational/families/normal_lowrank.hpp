@@ -15,7 +15,7 @@ class normal_lowrank : public base_family {
  private:
   Eigen::VectorXd mu_;
   Eigen::MatrixXd B_;
-  Eigen::VectorXd d_;
+  Eigen::VectorXd log_d_;
 
   const int dimension_;
   const int rank_;
@@ -52,7 +52,7 @@ class normal_lowrank : public base_family {
                           size_t rank)
   : mu_(mu),
     B_(Eigen::MatrixXd::Zero(mu.size(), rank)),
-    d_(Eigen::VectorXd::Zero(mu.size())),
+    log_d_(Eigen::VectorXd::Zero(mu.size())),
     dimension_(mu.size()),
     rank_(rank) {
   }
@@ -60,7 +60,7 @@ class normal_lowrank : public base_family {
   explicit normal_lowrank(size_t dimension, size_t rank)
   : mu_(Eigen::VectorXd::Zero(dimension)),
     B_(Eigen::MatrixXd::Zero(dimension, rank)),
-    d_(Eigen::VectorXd::Zero(dimension)),
+    log_d_(Eigen::VectorXd::Zero(dimension)),
     dimension_(dimension),
     rank_(rank) {
   }
@@ -68,7 +68,7 @@ class normal_lowrank : public base_family {
   explicit normal_lowrank(const Eigen::VectorXd& mu,
                           const Eigen::MatrixXd& B,
                           const Eigen::VectorXd& d)
-  : mu_(mu), B_(B), d_(d), dimension_(mu.size()), rank_(B.cols()) {
+  : mu_(mu), B_(B), log_d_(d), dimension_(mu.size()), rank_(B.cols()) {
     static const char* function = "stan::variational::normal_lowrank";
     validate_mean(function, mu);
     validate_factor(function, B);
@@ -81,7 +81,7 @@ class normal_lowrank : public base_family {
   const Eigen::VectorXd& mean() const { return mu(); }
   const Eigen::VectorXd& mu() const { return mu_; }
   const Eigen::MatrixXd& B() const { return B_; }
-  const Eigen::VectorXd& d() const { return d_; }
+  const Eigen::VectorXd& log_d() const { return log_d_; }
 
   void set_mu(const Eigen::VectorXd& mu) {
     static const char* function = "stan::variational::set_mu";
@@ -95,28 +95,28 @@ class normal_lowrank : public base_family {
     B_ = B;
   }
 
-  void set_d(const Eigen::VectorXd& d) {
-    static const char* function = "stan::variational::set_d";
-    validate_noise(function, d);
-    d_ = d;
+  void set_log_d(const Eigen::VectorXd& log_d) {
+    static const char* function = "stan::variational::set_log_d";
+    validate_noise(function, log_d);
+    log_d_ = log_d;
   }
 
   void set_to_zero() {
     mu_ = Eigen::VectorXd::Zero(dimension());
     B_ = Eigen::MatrixXd::Zero(dimension(), rank());
-    d_ = Eigen::VectorXd::Zero(dimension());
+    log_d_ = Eigen::VectorXd::Zero(dimension());
   }
 
   normal_lowrank square() const {
     return normal_lowrank(Eigen::VectorXd(mu_.array().square()),
                           Eigen::MatrixXd(B_.array().square()),
-                          Eigen::VectorXd(d_.array().square()));
+                          Eigen::VectorXd(log_d_.array().square()));
   }
 
   normal_lowrank sqrt() const {
     return normal_lowrank(Eigen::VectorXd(mu_.array().sqrt()),
                           Eigen::MatrixXd(B_.array().sqrt()),
-                          Eigen::VectorXd(d_.array().square()));
+                          Eigen::VectorXd(log_d_.array().square()));
   }
 
   normal_lowrank& operator=(const normal_lowrank& rhs) {
@@ -128,7 +128,7 @@ class normal_lowrank : public base_family {
                                  "Rank of rhs", rhs.rank());
     mu_ = rhs.mu();
     B_ = rhs.B();
-    d_ = rhs.d();
+    log_d_ = rhs.log_d();
     return *this;
   }
 
@@ -141,7 +141,7 @@ class normal_lowrank : public base_family {
                                  "Rank of rhs", rhs.rank());
     mu_ += rhs.mu();
     B_ += rhs.B();
-    d_ += rhs.d();
+    log_d_ += rhs.log_d();
     return *this;
   }
 
@@ -155,21 +155,21 @@ class normal_lowrank : public base_family {
                                  "Rank of rhs", rhs.rank());
     mu_.array() /= rhs.mu().array();
     B_.array() /= rhs.B().array();
-    d_.array() /= rhs.d().array();
+    log_d_.array() /= rhs.log_d().array();
     return *this;
   }
 
   normal_lowrank& operator+=(double scalar) {
     mu_.array() += scalar;
     B_.array() += scalar;
-    d_.array() += scalar;
+    log_d_.array() += scalar;
     return *this;
   }
 
   normal_lowrank& operator*=(double scalar) {
     mu_ *= scalar;
     B_ *= scalar;
-    d_ *= scalar;
+    log_d_ *= scalar;
     return *this;
   }
 
@@ -177,12 +177,14 @@ class normal_lowrank : public base_family {
     static int r = rank();
     static double mult = 0.5 * (1.0 + stan::math::LOG_TWO_PI);
     double result = mult * dimension();
-    result += 0.5 * log((Eigen::MatrixXd::Identity(r, r) +
-                      B_.transpose() *
-                      d_.array().square().matrix().asDiagonal().inverse() *
-                      B_).determinant());
+    result
+        += 0.5 * log(
+             (Eigen::MatrixXd::Identity(r, r) +
+              B_.transpose() *
+              log_d_.array().exp().square().matrix().asDiagonal().inverse() *
+              B_).determinant());
     for (int d = 0; d < dimension(); ++d) {
-      result += log(d_(d));
+      result += log_d_(d);
     }
     return result;
   }
@@ -196,7 +198,7 @@ class normal_lowrank : public base_family {
     stan::math::check_not_nan(function, "Input vector", eta);
     Eigen::VectorXd z = eta.head(rank());
     Eigen::VectorXd eps = eta.tail(dimension());
-    return (d_.cwiseProduct(eps)) + (B_ * z) + mu_;
+    return (log_d_.array().exp() * eps.array()).matrix() + (B_ * z) + mu_;
   }
 
   template <class BaseRNG>
@@ -246,19 +248,19 @@ class normal_lowrank : public base_family {
     Eigen::VectorXd mu_grad = Eigen::VectorXd::Zero(dimension());
     Eigen::MatrixXd B_grad = Eigen::MatrixXd::Zero(dimension(), rank());
     Eigen::VectorXd d_grad = Eigen::VectorXd::Zero(dimension());
+    Eigen::VectorXd log_d_grad = Eigen::VectorXd::Zero(dimension());
 
     double tmp_lp = 0.0;
-    Eigen::VectorXd tmp_mu_grad = Eigen::VectorXd::Zero(dimension());
     Eigen::VectorXd eta = Eigen::VectorXd::Zero(dimension() + rank());
     Eigen::VectorXd zeta = Eigen::VectorXd::Zero(dimension());
 
-    Eigen::MatrixXd inv_noise =
-      d_.array().square().matrix().asDiagonal().inverse();
-    Eigen::VectorXd var_grad_left = inv_noise - inv_noise * B_ *
-                                (Eigen::MatrixXd::Identity(rank(), rank()) +
-                                B_.transpose() * inv_noise * B_).inverse()
-                                * B_.transpose() * inv_noise;
-    Eigen::VectorXd tmp_var_grad_left = Eigen::VectorXd::Zero(dimension());
+    // (B.B^T + D^2)^-1 by Woodbury formula
+    Eigen::MatrixXd d_inv2
+        = log_d_.array().exp().square().matrix().asDiagonal().inverse();
+    Eigen::MatrixXd Bt = B_.transpose();
+    Eigen::MatrixXd id = Eigen::MatrixXd::Identity(rank(), rank());
+    Eigen::MatrixXd woodbury
+        = d_inv2 - d_inv2 * B_ * (id + Bt * d_inv2 * B_).inverse() * Bt * d_inv2;
 
     // Naive Monte Carlo integration
     static const int n_retries = 10;
@@ -270,20 +272,25 @@ class normal_lowrank : public base_family {
       Eigen::VectorXd z = eta.head(rank());
       Eigen::VectorXd eps = eta.tail(dimension());
       zeta = transform(eta);
+
+      // (B.B^T + D^2)^-1 . (mu + B.z + d*eps)
+      Eigen::VectorXd woodbury_zeta = woodbury * zeta;
+
       try {
         std::stringstream ss;
-        stan::model::gradient(m, zeta, tmp_lp, tmp_mu_grad, &ss);
+        stan::model::gradient(m, zeta, tmp_lp, mu_grad, &ss);
         if (ss.str().length() > 0)
           logger.info(ss);
-        stan::math::check_finite(function, "Gradient of mu", tmp_mu_grad);
+        stan::math::check_finite(function, "Gradient of mu", mu_grad);
 
-        mu_grad += tmp_mu_grad;
-        tmp_var_grad_left = tmp_mu_grad + var_grad_left * (zeta - mu_);
         for (int ii = 0; ii < dimension(); ++ii) {
           for (int jj = 0; jj <= ii && jj < rank(); ++jj) {
-            B_grad(ii, jj) += tmp_var_grad_left(ii) * z(jj);
+            B_grad(ii, jj) += mu_grad(ii) * z(jj);
+            B_grad(ii, jj) += woodbury_zeta(ii) * z(jj);
           }
-          d_grad(ii) += tmp_var_grad_left(ii) * eps(ii);
+          d_grad(ii) += mu_grad(ii) * eps(ii);
+          d_grad(ii) += woodbury_zeta(ii) * eps(ii);
+          log_d_grad(ii) = d_grad(ii) * exp(log_d_(ii));
         }
         ++i;
       } catch (const std::exception& e) {
@@ -300,11 +307,11 @@ class normal_lowrank : public base_family {
     }
     mu_grad /= static_cast<double>(n_monte_carlo_grad);
     B_grad /= static_cast<double>(n_monte_carlo_grad);
-    d_grad /= static_cast<double>(n_monte_carlo_grad);
+    log_d_grad /= static_cast<double>(n_monte_carlo_grad);
 
     elbo_grad.set_mu(mu_grad);
     elbo_grad.set_B(B_grad);
-    elbo_grad.set_d(d_grad);
+    elbo_grad.set_log_d(log_d_grad);
   }
 
   double calc_log_g(const Eigen::VectorXd& eta) const {
