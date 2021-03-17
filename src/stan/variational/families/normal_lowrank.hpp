@@ -40,16 +40,15 @@ class normal_lowrank : public base_family {
   }
 
   void validate_noise(const char *function,
-                      const Eigen::VectorXd& d) {
-    stan::math::check_not_nan(function, "log std vector", d);
+                      const Eigen::VectorXd& log_d) {
+    stan::math::check_not_nan(function, "log std vector", log_d);
     stan::math::check_size_match(function,
                                  "Dimension of mean vector", dimension(),
-                                 "Dimension of log std vector", d.size());
+                                 "Dimension of log std vector", log_d.size());
   }
 
  public:
-  explicit normal_lowrank(const Eigen::VectorXd& mu,
-                          size_t rank)
+  explicit normal_lowrank(const Eigen::VectorXd& mu, size_t rank)
   : mu_(mu),
     B_(Eigen::MatrixXd::Zero(mu.size(), rank)),
     log_d_(Eigen::VectorXd::Zero(mu.size())),
@@ -67,12 +66,12 @@ class normal_lowrank : public base_family {
 
   explicit normal_lowrank(const Eigen::VectorXd& mu,
                           const Eigen::MatrixXd& B,
-                          const Eigen::VectorXd& d)
-  : mu_(mu), B_(B), log_d_(d), dimension_(mu.size()), rank_(B.cols()) {
+                          const Eigen::VectorXd& log_d)
+  : mu_(mu), B_(B), log_d_(log_d), dimension_(mu.size()), rank_(B.cols()) {
     static const char* function = "stan::variational::normal_lowrank";
     validate_mean(function, mu);
     validate_factor(function, B);
-    validate_noise(function, d);
+    validate_noise(function, log_d);
   }
 
   int dimension() const { return dimension_; }
@@ -116,7 +115,7 @@ class normal_lowrank : public base_family {
   normal_lowrank sqrt() const {
     return normal_lowrank(Eigen::VectorXd(mu_.array().sqrt()),
                           Eigen::MatrixXd(B_.array().sqrt()),
-                          Eigen::VectorXd(log_d_.array().square()));
+                          Eigen::VectorXd(log_d_.array().sqrt()));
   }
 
   normal_lowrank& operator=(const normal_lowrank& rhs) {
@@ -177,6 +176,9 @@ class normal_lowrank : public base_family {
     static int r = rank();
     static double mult = 0.5 * (1.0 + stan::math::LOG_TWO_PI);
     double result = mult * dimension();
+    // Determinant by the matrix determinant lemma
+    //   det(D^2 + B.B^T) = det(I + B^T.D^-2.B) * det(D^2)
+    // where D^2 is diagonal and so can be computed accordingly
     result
         += 0.5 * log(
              (Eigen::MatrixXd::Identity(r, r) +
@@ -272,6 +274,8 @@ class normal_lowrank : public base_family {
     Eigen::MatrixXd id = Eigen::MatrixXd::Identity(rank(), rank());
     Eigen::MatrixXd woodbury
         = d_inv2 - d_inv2 * B_ * (id + Bt * d_inv2 * B_).inverse() * Bt * d_inv2;
+    
+    Eigen::VectorXd tmp_mu_grad = Eigen::VectorXd::Zero(dimension());
 
     // Naive Monte Carlo integration
     static const int n_retries = 10;
@@ -284,24 +288,23 @@ class normal_lowrank : public base_family {
       Eigen::VectorXd eps = eta.tail(dimension());
       zeta = transform(eta);
 
-      // (B.B^T + D^2)^-1 . (mu + B.z + d*eps)
-      Eigen::VectorXd woodbury_zeta = woodbury * zeta;
+      // (B.B^T + D^2)^-1 . (B.z + d*eps)
+      Eigen::VectorXd woodbury_zeta = woodbury * (zeta - mu_);
 
       try {
         std::stringstream ss;
-        stan::model::gradient(m, zeta, tmp_lp, mu_grad, &ss);
+        stan::model::gradient(m, zeta, tmp_lp, tmp_mu_grad, &ss);
         if (ss.str().length() > 0)
           logger.info(ss);
         stan::math::check_finite(function, "Gradient of mu", mu_grad);
 
+        mu_grad += tmp_mu_grad;
         for (int ii = 0; ii < dimension(); ++ii) {
           for (int jj = 0; jj <= ii && jj < rank(); ++jj) {
-            B_grad(ii, jj) += mu_grad(ii) * z(jj);
-            B_grad(ii, jj) += woodbury_zeta(ii) * z(jj);
+            B_grad(ii, jj) += (tmp_mu_grad(ii) + woodbury_zeta(ii)) * z(jj);
           }
-          d_grad(ii) += mu_grad(ii) * eps(ii);
-          d_grad(ii) += woodbury_zeta(ii) * eps(ii);
-          log_d_grad(ii) = d_grad(ii) * exp(log_d_(ii));
+          d_grad(ii) += (tmp_mu_grad(ii) + woodbury_zeta(ii)) * eps(ii);
+          log_d_grad(ii) += d_grad(ii) * exp(log_d_(ii));
         }
         ++i;
       } catch (const std::exception& e) {
